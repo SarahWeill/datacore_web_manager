@@ -769,7 +769,7 @@ class SFTPForm(forms.ModelForm):
                          url='dc_management:autocomplete-node'
                      ),
                      'storage': autocomplete.ModelSelect2(
-                         url='dc_management:autocomplete-storage'
+                         url='dc_management:autocomplete-dataaccess'
                      ),
                     }
 
@@ -851,7 +851,7 @@ class ProjectForm(forms.ModelForm):
                                         url='dc_management:autocomplete-user'
                                         ),
                     'storage' : autocomplete.ModelSelect2Multiple(
-                                        url='dc_management:autocomplete-storage'
+                                        url='dc_management:autocomplete-dataaccess'
                                         ),
                     'pi' : autocomplete.ModelSelect2(
                                         url='dc_management:autocomplete-user'
@@ -937,7 +937,7 @@ class ProjectUpdateForm(forms.ModelForm):
                                         url='dc_management:autocomplete-user'
                                         ),   
                     'storage' : autocomplete.ModelSelect2Multiple(
-                                        url='dc_management:autocomplete-storage'
+                                        url='dc_management:autocomplete-dataaccess'
                                         ),                 
                     'db' : autocomplete.ModelSelect2(
                                         url='dc_management:autocomplete-node'
@@ -1042,7 +1042,7 @@ class StorageAttachForm(forms.ModelForm):
         fields = [ 'storage', ]
 
         widgets =  {'storage' : autocomplete.ModelSelect2Multiple(
-                                url='dc_management:autocomplete-storage'
+                                url='dc_management:autocomplete-dataaccess'
                                 ), 
                     }
 
@@ -1163,11 +1163,11 @@ class FileTransferForm(forms.ModelForm):
                             Div(
                                 Div(  'destination', 
                                     label='Data Core source',
-                                    title="Use if source is a dcore project.",
+                                    title="Use if destination is a dcore project.",
                                     css_class="row",
                                 ),
                                 Div('external_destination', 
-                                    title="Use if destination is a dcore project.",
+                                    title="Use if destination is external to Data Core.",
                                     css_class="row",
                                 ),
                                 Div('filepath_dest',
@@ -1221,7 +1221,7 @@ class FileTransferForm(forms.ModelForm):
                                         ),
                     'file_num_unknown' : CheckboxInput(),    
                     'reviewed_by' : autocomplete.ModelSelect2(
-                                        url='dc_management:autocomplete-user'
+                                        url='dc_management:autocomplete-djuser'
                                         ),               
                     }
 

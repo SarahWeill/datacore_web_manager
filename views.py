@@ -4,7 +4,7 @@ import re
 from datetime import date, timedelta
 import time
 from urllib.parse import quote
-
+from mimetypes import guess_type
 import numpy as np
 
 from dal import autocomplete
@@ -13,6 +13,7 @@ from django.views import generic
 from django.views.generic.edit import CreateView, UpdateView, FormView
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
+from django.contrib.auth.models import User
 
 from django.core.exceptions import ObjectDoesNotExist
 
@@ -36,10 +37,10 @@ from .models import Software, Software_Log, Storage_Log, Storage
 from .models import UserCost, SoftwareCost, StorageCost, DCUAGenerator, DatabaseCost
 from .models import FileTransfer, MigrationLog, CommentLog
 from .models import ProjectBillingRecord, ExtraResourceCost
-from .models import DataCoreUserAgreement, AnnualProjectAttestation, SFTP
+from .models import DataCoreUserAgreement, SFTP
 
 from persons.models import Person
-from datacatalog.models import Dataset, DataUseAgreement
+from datacatalog.models import Dataset, DataUseAgreement, DataAccess
 
 from .forms import AddUserToProjectForm, RemoveUserFromProjectForm
 from .forms import ExportFileForm, CreateDCAgreementURLForm
@@ -111,6 +112,19 @@ class CommentView(LoginRequiredMixin, CreateView):
 ####################################
 ######  AUTOCOMPLETE  VIEWS   ######
 ####################################
+class DjangoUserAutocomplete(LoginRequiredMixin, autocomplete.Select2QuerySetView):
+    def get_queryset(self):
+        qs = User.objects.all()
+
+        if self.q:
+            qs = qs.filter(
+                            Q(username__istartswith=self.q) |
+                            Q(first_name__istartswith=self.q) |
+                            Q(last_name__istartswith=self.q)
+                            )
+            #qs = qs.filter(cwid__istartswith=self.q)
+
+        return qs
 
 class DCUserAutocomplete(LoginRequiredMixin, autocomplete.Select2QuerySetView):
     def get_queryset(self):
@@ -183,6 +197,18 @@ class StorageAutocomplete(LoginRequiredMixin, autocomplete.Select2QuerySetView):
             qs = qs.filter(
                             Q(name__icontains=self.q) | 
                             Q(description__icontains=self.q)
+                            )
+        return qs
+
+class DataAccessAutocomplete(LoginRequiredMixin, autocomplete.Select2QuerySetView):
+    def get_queryset(self):
+        qs = DataAccess.objects.all()
+
+        if self.q:
+            qs = qs.filter(
+                            Q(name__icontains=self.q) |
+                            Q(storage_type__name__icontains=self.q) |
+                            Q(filepaths__icontains=self.q)
                             )
         return qs
 
@@ -330,9 +356,10 @@ class IndexProjectView(PermissionRequiredMixin, generic.ListView):
         })
         return context
         
-class IndexUserView(LoginRequiredMixin, generic.ListView):
+class IndexUserView(PermissionRequiredMixin, generic.ListView):
     template_name = 'dc_management/index_users.html'
     context_object_name = 'user_list'
+    permission_required = 'dc_management.view_project'
 
     def get_queryset(self):
         """Return  all active projects."""
@@ -559,7 +586,7 @@ class ProjectView(LoginRequiredMixin, generic.DetailView):
             available_sw = []            
         
         # pull all governance docs from datasets on attached storage:
-        prj_governance = DataUseAgreement.objects.filter(datasets__storage__project=self.object.pk,
+        prj_governance = DataUseAgreement.objects.filter(datasets__dataaccess__dc_project=self.object.pk,
                                 ).distinct()
         
         # create other lists for display:
@@ -748,6 +775,9 @@ class StorageChange(LoginRequiredMixin, CreateView):
         # match storage type to project (this needs to be more robust)
         s_type = log.storage_type.storage_type
         assess_server = False
+        existing_project_storage = None
+        new_project_storage = None
+
         if re.search('direct', s_type.lower()):
             existing_project_storage = project.direct_attach_storage
             if not existing_project_storage:
@@ -763,8 +793,8 @@ class StorageChange(LoginRequiredMixin, CreateView):
         elif re.search('derivative', s_type.lower()):
             project.fileshare_derivative = log.storage_amount
         else:
-            pass # may want to add an error message here.
-        
+            raise Http404()
+
         project.save()
         log.save()
         
@@ -871,7 +901,7 @@ class AllStorageView(PermissionRequiredMixin, generic.ListView):
     
     def get_queryset(self):
         """Return  all storage."""
-        return Storage.objects.all().order_by('name')
+        return DataAccess.objects.all().order_by('name')
 
 class StorageCreate(PermissionRequiredMixin, CreateView):
     model = Storage
@@ -1018,9 +1048,10 @@ class SFTPUpdate(PermissionRequiredMixin, UpdateView):
         self.object.save()
         return super(SFTPUpdate, self).form_valid(form)
 
-###############################
-######  UPDATE SOFTWARE  ######
-###############################
+# ############################# #
+# #####  UPDATE SOFTWARE  ##### #
+# ############################# #
+
 
 class UpdateSoftware(LoginRequiredMixin, FormView):
     template_name = 'dc_management/updatesoftwareform.html'
@@ -1042,12 +1073,12 @@ class UpdateSoftware(LoginRequiredMixin, FormView):
                                      prj.host.ip_address,
                                     )
 
-        email_dict = {  'subject'       :sbj_msg,
-                        'body'          :body_msg,
-                        'to_email'      :"dcore-ticket@med.cornell.edu",
-                        'subject_html'  :quote(sbj_msg),
-                        'body_html'     :quote(body_msg),
-        }
+        email_dict = {'subject': sbj_msg,
+                      'body': body_msg,
+                      'to_email': "dcore-ticket@med.cornell.edu",
+                      'subject_html': quote(sbj_msg),
+                      'body_html': quote(body_msg),
+                      }
         
         self.request.session['email_json'] = json.dumps(email_dict)
     
@@ -1057,29 +1088,29 @@ class UpdateSoftware(LoginRequiredMixin, FormView):
         """
         sbj_str = '{} software {} to {}'
         body_str = 'Please install {} on node {} ({}).'
-        sbj_msg  = sbj_str.format(changestr, sw, node.node)
+        sbj_msg = sbj_str.format(changestr, sw, node.node)
         body_msg = body_str.format(sw, 
-                             node.node,
-                             node.ip_address,
-                            )
+                                   node.node,
+                                   node.ip_address,
+                                   )
 
-        email_dict = {  'subject'       :sbj_msg,
-                        'body'          :body_msg,
-                        'to_email'      :"dcore-ticket@med.cornell.edu",
-                        'subject_html'  :quote(sbj_msg),
-                        'body_html'     :quote(body_msg),
-        }
+        email_dict = {'subject': sbj_msg,
+                      'body': body_msg,
+                      'to_email': "dcore-ticket@med.cornell.edu",
+                      'subject_html': quote(sbj_msg),
+                      'body_html': quote(body_msg),
+                      }
         
         self.request.session['email_json'] = json.dumps(email_dict)
 
     def form_valid(self, form):
         # clear email fields in session
-        email_details = {   'subject'       :"na",
-                            'body'          :"na",
-                            'to_email'      :"na",
-                            'subject_html'  :"na",
-                            'body_html'     :"na",
-        }
+        email_details = {'subject': "na",
+                         'body': "na",
+                         'to_email': "na",
+                         'subject_html': "na",
+                         'body_html': "na",
+                         }
         self.request.session['email_json'] = json.dumps(email_details)
         
         # Check if user in project, then connect user to project
@@ -1149,16 +1180,19 @@ class UpdateSoftware(LoginRequiredMixin, FormView):
                 
         return super(UpdateSoftware, self).form_valid(form)    
 
+
 class EmailResults(LoginRequiredMixin, generic.TemplateView):
     template_name = 'dc_management/email_result.html'
-    
+
+
 class SoftwareView(LoginRequiredMixin, generic.DetailView):
     model = Software
     template_name = 'dc_management/software.html'
-    
-###############################
-######  USER PAGE VIEWS  ######
-###############################
+
+# ############################# #
+# #####  USER PAGE VIEWS  ##### #
+# ############################# #
+
 
 class UserProjectView(LoginRequiredMixin, generic.DetailView):
     model = Project
@@ -1571,11 +1605,13 @@ class CreateDCAgreementURL(LoginRequiredMixin, CreateView):
 
         return super(CreateDCAgreementURL, self).form_valid(form)
 
+
 class ViewDCAgreementURL(LoginRequiredMixin, generic.DetailView):
     template_name = 'dc_management/dcua_url_generator_result.html'
     model = DCUAGenerator
 
 ###### Export requests #######
+
 
 class ExportRequest(LoginRequiredMixin, FormView):
     template_name = 'dc_management/export_request_form.html'
@@ -1587,9 +1623,7 @@ class ExportRequest(LoginRequiredMixin, FormView):
         # This method is called when valid form data has been POSTed.
         # It should return an HttpResponse.
         post_data = self.request.POST
-        
-        
-        
+
         # Check if user in project, then connect user to project
         
         prj = form.cleaned_data['project']
@@ -1630,12 +1664,11 @@ class ExportRequest(LoginRequiredMixin, FormView):
         )
         return super(AddUserToProject, self).form_valid(form)
 
+
 class ExportFromThisProject(ExportRequest):
     template_name = 'dc_management/addusertoproject.html'
     form_class = ExportFileForm
     success_url = reverse_lazy('dc_management:all_projects')
-    #chosen_user = Person.objects.get(pk=self.kwargs['pk'])
-    #success_url = reverse_lazy('dc_management:dcuser', self.kwargs['pk'])
     
     def get_initial(self):
         initial = super(AddThisUserToProject, self).get_initial()
@@ -1649,45 +1682,63 @@ class ExportFromThisProject(ExportRequest):
 ######  GOVERNANCE RELATED VIEWS  ######
 ########################################
 
+
 @login_required()
 def pdf_view(request, pk):
     gov_doc = Governance_Doc.objects.get(pk=pk)
     # check to see if file is associated:
     try:
         gd_file = gov_doc.documentation.file
-    except (FileNotFoundError, ValueError) as e:
+    except (FileNotFoundError, ValueError):
         raise Http404()
-        
-    if gov_doc.documentation.name[-3:] == "pdf":
+
+    # get standardized extension name to evaluate how to display:
+    extension_raw = os.path.splitext(gov_doc.documentation.name)
+    extension = extension_raw[1][1:].lower()
+
+    # serve pdfs for viewing in the browser
+    if extension == "pdf":
         try:
-            # open(gov_doc.documentation.file, 'rb')
-            return FileResponse(gov_doc.documentation.file, 
-                                content_type='application/pdf')
+            return FileResponse(gov_doc.documentation.file,
+                                content_type='application/pdf',
+                                )
         except FileNotFoundError:
             raise Http404()
-    elif gov_doc.documentation.name[-4:] == "docx":
+
+    # viewing of docx files
+    elif extension == "docx":
         try:
             with open(str(gov_doc.documentation.file), 'rb') as fh:
                 response = HttpResponse(fh.read(),
-                                        content_type="application/vnd.ms-word")
-                response['Content-Disposition'] = 'inline; filename=' + os.path.basename(str(gov_doc.documentation.file))
+                                        content_type="application/vnd.ms-word",
+                                        )
+                response['Content-Disposition'] = f'inline; filename={os.path.basename(str(gov_doc.documentation.file))}'
                 return response
             
         except FileNotFoundError:
             raise Http404()
+
+    # download all other files for handling by the user.
     else:
-        raise Http404()
+        mime_type = guess_type(gov_doc.documentation.name)
+        with open(str(gov_doc.documentation.file), 'rb') as fh:
+            response = HttpResponse(fh.read(),
+                                    content_type=mime_type,
+                                    )
+            response['Content-Disposition'] = f'attachment; filename={os.path.basename(str(gov_doc.documentation.file))}'
+            return response
+
 
 class GovernanceView(LoginRequiredMixin, generic.DetailView):
     model = Governance_Doc
     template_name = 'dc_management/governance_meta.html'
 
+
 class GovernanceCreate(LoginRequiredMixin, CreateView):
     model = Governance_Doc
     form_class = GovernanceDocForm
     template_name = 'dc_management/governance_form.html'
-    #success_url = reverse_lazy("dc_management:index" )
-    # default success_url should be to the object page defined in model.
+
     def form_valid(self, form):
         # add the logged in user as the record author
         form.instance.record_author = self.request.user
@@ -1695,14 +1746,12 @@ class GovernanceCreate(LoginRequiredMixin, CreateView):
         self.object = form.save(commit=False)
         return super(GovernanceCreate, self).form_valid(form)
 
+
 class GovernanceUpdate(LoginRequiredMixin, UpdateView):
     model = Governance_Doc
     form_class = GovernanceDocForm
     template_name = 'dc_management/governance_form.html'
-    #is_update_view = True
-    
-    #success_url = reverse_lazy("dc_management:index" )
-    #default success_url should be to the object page defined in model.
+
     def form_valid(self, form):
         # add the logged in user as the record author
         form.instance.record_author = self.request.user
@@ -2215,10 +2264,8 @@ class FileTransferCreate(LoginRequiredMixin, CreateView):
             plural = ""
         
         if form.instance.source:
-            src = "from {} ({})".format(form.instance.source.dc_prj_id, 
-                            form.instance.source.host.node,
-                            )
-            basepath = "   \\\\hpr_datacore_{}\\".format(form.instance.source.dc_prj_id,)
+            src = f"from {form.instance.source.dc_prj_id} ({form.instance.source.host.node})"
+            basepath = f"   \\\\hpr_datacore_{form.instance.source.dc_prj_id}\\"
             src_path = "\n".join(
                 [ basepath + fn for fn in str(form.instance.filenames).split('\n') ]
                                 ) 
@@ -2226,16 +2273,12 @@ class FileTransferCreate(LoginRequiredMixin, CreateView):
             src = "attached to this ticket"
             src_path = form.instance.filenames
         else:
-            src = "from {}".format(form.instance.transfer_method)
+            src = f"from {form.instance.transfer_method}"
             src_path = form.instance.filenames
             
         if form.instance.destination:
-            dest = "to {} ({})".format(form.instance.destination.dc_prj_id, 
-                            form.instance.destination.host.node,
-                            )
-            basepath = "   \\\\hpr_datacore_{}\\".format( 
-                                                form.instance.destination.dc_prj_id,
-                                                )
+            dest = f"to {form.instance.destination.dc_prj_id} ({form.instance.destination.host.node})"
+            basepath = f"   \\\\hpr_datacore_{form.instance.destination.dc_prj_id}\\"
             dest_path = "\n".join(
                 [ basepath + fn for fn in str(form.instance.filepath_dest).split('\n') ]
                                 ) 
@@ -2245,31 +2288,24 @@ class FileTransferCreate(LoginRequiredMixin, CreateView):
                                         )
             dest_path = form.instance.filepath_dest
         
-        subject_str = '{}Transfer file{} {} {}'
-        body_str = '''Dear OPs,
+        subj_msg = f'{sbj_ticket}Transfer file{plural} {src} {dest}'
+        body_msg = f'''Dear OPs,
 
-Please copy the following {0} file{1} {2} {3}:
+Please copy the following {form.instance.file_num} file{plural} {src} {dest}:
 
-Source: {4}
+_______
+SOURCE: 
+{src_path}
 
-Destination: {7}
+___________
+DESTINATION: 
+{dest_path}
 
-{5}
+{form.instance.comment}
 
 Kind regards,
-{6}'''
-        subj_msg = subject_str.format(sbj_ticket, plural, src, dest)
-        body_msg = body_str.format(form.instance.file_num,              # 0
-                                    plural,                             # 1
-                                    src,                                # 2
-                                    dest,                               # 3
-                                    src_path,                           # 4
-                                    form.instance.comment,              # 5
-                                    self.request.user.get_short_name(), # 6
-                                    dest_path,                          # 7
-                                    #form.instance.source.dc_prj_id      # 8
-                                    )
-        
+{self.request.user.get_short_name()}'''
+
         email_dict = {  'subject'       :subj_msg,
                         'body'          :body_msg,
                         'to_email'      :toemail,
